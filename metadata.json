@@ -1,0 +1,8 @@
+{
+  "name": "M365 Excel Manager",
+  "description": "Upload Excel files to OneDrive and generate organizational sharing links via Microsoft Graph API.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

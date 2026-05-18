@@ -46,10 +46,10 @@ app.post('/api/m365/upload-excel', async (req, res) => {
       }
     });
 
-    // 4. Generate Editable Link
+    // 4. Generate Editable Link (NO LOGIN REQUIRED)
     const linkUrl = `https://graph.microsoft.com/v1.0/users/${adminEmail}/drive/items/${uploadResponse.data.id}/createLink`;
     const linkResponse = await axios.post(
-      linkUrl, { type: 'edit', scope: 'organization' },
+      linkUrl, { type: 'edit', scope: 'anonymous' },
       { headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
     );
 
@@ -65,7 +65,7 @@ app.get('/', (req, res) => {
   res.send('Om Dedy Backend API is running. Use POST /api/m365/upload-excel for uploads.');
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
 if (process.env.NODE_ENV !== 'production') {
   app.listen(PORT, '0.0.0.0', () => console.log(`Om Dedy Backend API running on port ${PORT}`));
 }

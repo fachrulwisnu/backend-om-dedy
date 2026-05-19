@@ -3,6 +3,7 @@ import { Upload, FileSpreadsheet, CheckCircle2, AlertCircle, ExternalLink, Loade
 import { motion, AnimatePresence } from "motion/react";
 
 export default function App() {
+  const [projectId, setProjectId] = useState("project_123");
   const [projectName, setProjectName] = useState("My_Awesome_Project");
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -40,7 +41,7 @@ export default function App() {
   };
 
   const handleUpload = async () => {
-    if (!file || !projectName) return;
+    if (!file || !projectName || !projectId) return;
 
     setUploading(true);
     setError(null);
@@ -51,6 +52,7 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          projectId: projectId,
           projectName: projectName,
           excelBase64: base64,
         }),
@@ -59,9 +61,8 @@ export default function App() {
       const data = await response.json();
 
       if (data.success) {
-        // The shareUrl from response is the direct M365 link, 
-        // but we can also use our permanent redirect link.
-        const permanentLink = `${window.location.origin}/api/m365/share-link/${encodeURIComponent(projectName)}`;
+        // Use our permanent redirect link based on projectId
+        const permanentLink = `${window.location.origin}/api/m365/share-link/${encodeURIComponent(projectId)}`;
         setShareUrl(permanentLink);
       } else {
         setError(data.message || "Failed to upload file.");
@@ -93,15 +94,27 @@ export default function App() {
               animate={{ opacity: 1, y: 0 }}
               className="space-y-6"
             >
-              <div className="space-y-2">
-                <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Project Name</label>
-                <input 
-                  type="text"
-                  value={projectName}
-                  onChange={(e) => setProjectName(e.target.value)}
-                  placeholder="Enter project/timeline name"
-                  className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:border-slate-900 focus:ring-1 focus:ring-slate-900 outline-none transition-all text-sm"
-                />
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Project ID</label>
+                  <input 
+                    type="text"
+                    value={projectId}
+                    onChange={(e) => setProjectId(e.target.value)}
+                    placeholder="e.g. project_123"
+                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:border-slate-900 focus:ring-1 focus:ring-slate-900 outline-none transition-all text-sm"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Project Name</label>
+                  <input 
+                    type="text"
+                    value={projectName}
+                    onChange={(e) => setProjectName(e.target.value)}
+                    placeholder="Enter project/timeline name"
+                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:border-slate-900 focus:ring-1 focus:ring-slate-900 outline-none transition-all text-sm"
+                  />
+                </div>
               </div>
 
               <div 

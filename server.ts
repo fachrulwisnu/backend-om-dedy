@@ -14,18 +14,12 @@ const db: any = (global as any).db || {
   historyLog: { create: async () => ({}) },
   project: {
     findFirst: async ({ where }: any) => ({
-      name: where.name,
-      current_excel_filename: `OM_DEDY_Timeline_${where.name}_latest.xlsx`,
+      id: where.id || 'p123',
+      name: where.name || 'Project Name',
+      current_excel_filename: `OM_DEDY_Timeline_${where.name || 'Project'}_latest.xlsx`,
       current_sharing_url: 'https://onedrive.live.com/test'
     }),
     update: async ({ where, data }: any) => ({ ...where, ...data })
-  },
-  getProjectByName: async (name: string) => {
-    return {
-      name,
-      current_excel_filename: `OM_DEDY_Timeline_${name.replace(/[^a-zA-Z0-9]/g, '_')}_latest.xlsx`,
-      current_sharing_url: 'https://onedrive.live.com/test'
-    };
   }
 };
 
@@ -35,9 +29,9 @@ app.use(express.json({ limit: '50mb' }));
 
 app.post('/api/m365/upload-excel', async (req, res) => {
   try {
-    const { projectName, excelBase64 } = req.body;
-    if (!projectName || !excelBase64) {
-      return res.status(400).json({ success: false, message: 'Missing projectName or Excel data' });
+    const { projectId, projectName, excelBase64 } = req.body;
+    if (!projectId || !projectName || !excelBase64) {
+      return res.status(400).json({ success: false, message: 'Missing projectId, projectName or Excel data' });
     }
 
     const tenantId = process.env.M365_TENANT_ID;
@@ -84,16 +78,16 @@ app.post('/api/m365/upload-excel', async (req, res) => {
 
     const sharingUrl = linkResponse.data.link.webUrl;
 
-    // UPDATE THE DATABASE with latest metadata
+    // UPDATE THE DATABASE with latest metadata using projectId
     try {
       await db.project.update({
-        where: { name: projectName },
+        where: { id: projectId },
         data: {
           current_excel_filename: filename,
           current_sharing_url: sharingUrl
         }
       });
-      console.log(`[DB UPDATE] Saved metadata for project: ${projectName}`);
+      console.log(`[DB UPDATE] Saved metadata for projectId: ${projectId}`);
     } catch (dbErr) {
       console.error(`[DB ERROR] Failed to save project metadata:`, dbErr);
     }
@@ -107,21 +101,21 @@ app.post('/api/m365/upload-excel', async (req, res) => {
 
 app.post('/api/m365/sync-feedback', async (req, res) => {
   try {
-    const { projectName } = req.body;
-    if (!projectName) {
-      return res.status(400).json({ success: false, message: 'Project Name is required' });
+    const { projectId, projectName } = req.body;
+    if (!projectId || !projectName) {
+      return res.status(400).json({ success: false, message: 'Project ID and Name are required' });
     }
 
     // TASK 2: UPDATE SYNC ENDPOINT BASED ON DATABASE
-    // Query database to get the current_excel_filename for the requested projectName
-    const project = await db.project.findFirst({ where: { name: projectName } });
+    // Query database to get the current_excel_filename for the requested projectId
+    const project = await db.project.findFirst({ where: { id: projectId } });
     
     if (!project || !project.current_excel_filename) {
       return res.status(404).json({ success: false, message: 'File Excel untuk proyek ini belum pernah diexport atau tidak ditemukan.' });
     }
 
     const filename = project.current_excel_filename;
-    console.log(`[MANUAL SYNC] Initiated for project: ${projectName}, using filename from DB: ${filename}`);
+    console.log(`[MANUAL SYNC] Initiated for projectId: ${projectId}, using filename from DB: ${filename}`);
 
     const tenantId = process.env.M365_TENANT_ID;
     const clientId = process.env.M365_CLIENT_ID;
@@ -223,18 +217,18 @@ app.post('/api/m365/sync-feedback', async (req, res) => {
 });
 
 // TASK 3: IMPLEMENT THE PERMANENT REDIRECT ENDPOINT
-app.get('/api/m365/share-link/:projectName', async (req, res) => {
+app.get('/api/m365/share-link/:projectId', async (req, res) => {
   try {
-    const { projectName } = req.params;
+    const { projectId } = req.params;
     
-    // 1. Fetch the latest project data from our database
-    const project = await db.project.findFirst({ where: { name: projectName } });
+    // 1. Fetch the latest project data from our database using projectId
+    const project = await db.project.findFirst({ where: { id: projectId } });
     
     if (!project || !project.current_sharing_url) {
       return res.status(404).send("File Excel untuk proyek ini belum pernah diexport atau tidak ditemukan.");
     }
 
-    console.log(`[REDIRECT] Forwarding user to latest Excel for: ${projectName}`);
+    console.log(`[REDIRECT] Forwarding user to latest Excel for projectId: ${projectId}`);
     
     // 2. Perform a HTTP 302 temporary redirect to the actual dynamic Microsoft link
     return res.redirect(project.current_sharing_url);

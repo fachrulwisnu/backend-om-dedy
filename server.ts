@@ -98,9 +98,81 @@ app.post('/api/m365/upload-excel', async (req, res) => {
     const cleanProjectName = projectName.replace(/[^a-zA-Z0-9]/g, '_');
     const filename = `OM_DEDY_Timeline_${cleanProjectName}.xlsx`;
     
-    console.log(`[EXPORT] Prepared for one-way push: ${filename}`);
+    console.log(`[EXPORT] Starting Read-Merge-Write pipeline for: ${filename}`);
 
-    const fileBuffer = Buffer.from(excelBase64, 'base64');
+    // --- STEP 1: READ (Fetch existing feedback for preservation) ---
+    const feedbackMap = new Map<string, { fachrul: any, barra: any }>();
+    try {
+      const downloadUrl = `https://graph.microsoft.com/v1.0/users/${adminEmail}/drive/root:/OmDedy_Projects/${filename}:/content`;
+      const existingFileResponse = await axios.get(downloadUrl, {
+        headers: { 'Authorization': `Bearer ${accessToken}` },
+        responseType: 'arraybuffer'
+      });
+
+      if (existingFileResponse.status === 200) {
+        const existingWorkbook = XLSX.read(existingFileResponse.data, { type: 'buffer' });
+        const existingSheet = existingWorkbook.Sheets[existingWorkbook.SheetNames[0]];
+        const existingData: any[][] = XLSX.utils.sheet_to_json(existingSheet, { header: 1 });
+
+        // Preserving columns L (11) and M (12) keyed by Column C (2)
+        for (let i = 12; i < existingData.length; i++) {
+          const row = existingData[i];
+          if (row && row[2]) {
+            const taskKey = String(row[2]).trim();
+            feedbackMap.set(taskKey, {
+              fachrul: row[11] || null,
+              barra: row[12] || null
+            });
+          }
+        }
+        console.log(`[EXPORT] Preserved feedback for ${feedbackMap.size} tasks from existing file.`);
+      }
+    } catch (readErr: any) {
+      if (readErr.response && readErr.response.status === 404) {
+        console.log(`[EXPORT] No existing file found. Proceeding with fresh export.`);
+      } else {
+        console.warn(`[EXPORT] Read warning (could not download existing file):`, readErr.message);
+      }
+    }
+
+    // --- STEP 2 & 3: GENERATE & MERGE ---
+    // Parse the incoming buffer from the frontend
+    const incomingBuffer = Buffer.from(excelBase64, 'base64');
+    const incomingWorkbook = XLSX.read(incomingBuffer, { type: 'buffer' });
+    const sheetName = incomingWorkbook.SheetNames[0];
+    const incomingSheet = incomingWorkbook.Sheets[sheetName];
+    const incomingData: any[][] = XLSX.utils.sheet_to_json(incomingSheet, { header: 1 });
+
+    // Iterate through incoming data and merge preserved feedback
+    for (let i = 12; i < incomingData.length; i++) {
+      const row = incomingData[i];
+      if (row && row[2]) {
+        const taskKey = String(row[2]).trim();
+        const preserved = feedbackMap.get(taskKey);
+        if (preserved) {
+          // Row is an array, we ensure it has at least 13 elements to reach column M
+          if (row.length < 13) {
+            while (row.length < 13) row.push(null);
+          }
+          // Inject preserved feedback if the new row is empty or placeholder in those columns
+          // Usually, the export might have nulls or '-' for these if they aren't in the DB
+          row[11] = preserved.fachrul || row[11]; 
+          row[12] = preserved.barra || row[12];
+        }
+      }
+    }
+
+    // Generate the final buffer from the merged data
+    const finalSheet = XLSX.utils.aoa_to_sheet(incomingData);
+    // Copy cell properties (styles/merges) if they existed in the incoming sheet
+    finalSheet['!merges'] = incomingSheet['!merges'];
+    finalSheet['!cols'] = incomingSheet['!cols'];
+    
+    const finalWorkbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(finalWorkbook, finalSheet, sheetName);
+    const finalFileBuffer = XLSX.write(finalWorkbook, { type: 'buffer', bookType: 'xlsx' });
+
+    // --- STEP 4: WRITE (Overwrite) ---
     const uploadUrl = `https://graph.microsoft.com/v1.0/users/${adminEmail}/drive/root:/OmDedy_Projects/${filename}:/content`;
     
     // Robust overwrite with retry to handle M365 file locking
@@ -126,7 +198,7 @@ app.post('/api/m365/upload-excel', async (req, res) => {
 
     let uploadResponse;
     try {
-      uploadResponse = await uploadWithRetry(uploadUrl, fileBuffer, accessToken);
+      uploadResponse = await uploadWithRetry(uploadUrl, finalFileBuffer, accessToken);
     } catch (uploadErr: any) {
       if (uploadErr.response && uploadErr.response.status === 423) {
         return res.status(423).json({ 

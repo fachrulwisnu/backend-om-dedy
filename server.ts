@@ -47,25 +47,37 @@ app.post('/api/m365/upload-excel', async (req, res) => {
     const checkUrl = `https://graph.microsoft.com/v1.0/users/${adminEmail}/drive/root:/OmDedy_Projects/${filename}`;
 
     try {
-      // 2. SMART CHECK: See if the file already exists to bypass locking issues
-      const checkResponse = await axios.get(checkUrl, {
-        headers: { 'Authorization': `Bearer ${accessToken}` }
-      });
-      itemId = checkResponse.data.id; // File exists! Reuse this ID without overwriting
+      // Check if file exists
+      const checkResponse = await axios.get(checkUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
+      itemId = checkResponse.data.id; 
+
+      // FIX: OVERWRITE THE FILE WITH NEW DATA!
+      try {
+        const fileBuffer = Buffer.from(excelBase64, 'base64');
+        const uploadUrl = `https://graph.microsoft.com/v1.0/users/${adminEmail}/drive/items/${itemId}/content`;
+        await axios.put(uploadUrl, fileBuffer, {
+          headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }
+        });
+        console.log(`[EXPORT] Successfully overwrote existing file: ${filename}`);
+      } catch (overwriteErr: any) {
+        if (overwriteErr.response && overwriteErr.response.status === 423) {
+          // Return a safe error if the file is locked by a user
+          return res.status(423).json({ success: false, message: 'File Excel sedang dibuka. Harap tutup tab Excel Online Anda terlebih dahulu sebelum menambah Task!' });
+        }
+        throw overwriteErr;
+      }
+
     } catch (err: any) {
-      // 3. IF FILE DOES NOT EXIST (404), UPLOAD IT FOR THE FIRST TIME
+      // IF FILE DOES NOT EXIST (404), CREATE IT
       if (err.response && err.response.status === 404) {
         const fileBuffer = Buffer.from(excelBase64, 'base64');
         const uploadUrl = `${checkUrl}:/content`;
         const uploadResponse = await axios.put(uploadUrl, fileBuffer, {
-          headers: { 
-            'Authorization': `Bearer ${accessToken}`, 
-            'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
-          }
+          headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }
         });
         itemId = uploadResponse.data.id;
       } else {
-        throw err; // Rethrow any other unexpected network errors
+        throw err;
       }
     }
 
@@ -133,15 +145,19 @@ app.post('/api/m365/sync-feedback', async (req, res) => {
       const row: any = rawData[i];
       if (!row || row.length === 0) continue;
 
-      const taskName = row[2]; // Column C (Index 2)
+      let taskName = row[2]; // Column C (Index 2)
       const fachrulFeedback = row[11]; // Column L (Index 11)
       const barraFeedback = row[12]; // Column M (Index 12)
       
       if (taskName && !String(taskName).includes('TOTAL') && taskName !== 'Task') {
-        const fFeedbackVal = (fachrulFeedback && fachrulFeedback !== '-') ? fachrulFeedback : null;
-        const bFeedbackVal = (barraFeedback && barraFeedback !== '-') ? barraFeedback : null;
+        taskName = String(taskName).trim(); // Prevent trailing space mismatches
+
+        const fFeedbackVal = (fachrulFeedback && fachrulFeedback !== '-') ? String(fachrulFeedback).trim() : null;
+        const bFeedbackVal = (barraFeedback && barraFeedback !== '-') ? String(barraFeedback).trim() : null;
 
         if (fFeedbackVal !== null || bFeedbackVal !== null) {
+          console.log(`[SYNC ATTEMPT] Task: "${taskName}" | F-Feed: "${fFeedbackVal}" | B-Feed: "${bFeedbackVal}"`);
+          
           try {
             // 1. Update the main task table
             const updatedRecord = await db.task.updateMany({
@@ -169,11 +185,12 @@ app.post('/api/m365/sync-feedback', async (req, res) => {
               updateCount++;
             }
           } catch (dbErr) {
-            console.error(`DB Update Error for task ${taskName}:`, dbErr);
+            console.error(`[DB ERROR] Failed to update task "${taskName}":`, dbErr);
           }
         }
       }
     }
+    console.log(`[SYNC FINAL] Successfully processed ${updateCount} rows.`);
 
     res.status(200).json({ 
       success: true, 

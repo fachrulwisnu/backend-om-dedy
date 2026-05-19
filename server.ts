@@ -86,17 +86,22 @@ app.post('/api/m365/upload-excel', async (req, res) => {
 
 app.post('/api/m365/sync-feedback', async (req, res) => {
   try {
-    const { filename, projectName } = req.body;
-    if (!filename || !projectName) {
-      return res.status(400).json({ success: false, message: 'Missing parameters' });
+    const { projectName } = req.body;
+    if (!projectName) {
+      return res.status(400).json({ success: false, message: 'Project Name is required' });
     }
+
+    const cleanProjectName = projectName.replace(/[^a-zA-Z0-9]/g, '_');
+    const filename = `OM_DEDY_Timeline_${cleanProjectName}.xlsx`;
+
+    console.log(`[MANUAL SYNC] Initiated for project: ${projectName}, filename: ${filename}`);
 
     const tenantId = process.env.M365_TENANT_ID;
     const clientId = process.env.M365_CLIENT_ID;
     const clientSecret = process.env.M365_CLIENT_SECRET;
     const adminEmail = process.env.M365_ADMIN_EMAIL;
 
-    // 1. Get Microsoft Graph Access Token
+    // 1. Get Access Token
     const tokenResponse = await axios.post(
       `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
       new URLSearchParams({ 
@@ -109,61 +114,79 @@ app.post('/api/m365/sync-feedback', async (req, res) => {
     );
     const accessToken = tokenResponse.data.access_token;
 
-    // 2. Download the Excel file from OneDrive (the updated one)
+    // 2. Download Excel directly from OneDrive
     const downloadUrl = `https://graph.microsoft.com/v1.0/users/${adminEmail}/drive/root:/OmDedy_Projects/${filename}:/content`;
-    const downloadResponse = await axios.get(downloadUrl, {
+    const fileResponse = await axios.get(downloadUrl, {
       headers: { 'Authorization': `Bearer ${accessToken}` },
-      responseType: 'arraybuffer'
+      responseType: 'arraybuffer' 
     });
 
-    // 3. Parse the Excel file to extract updatedTasks
-    const workbook = XLSX.read(downloadResponse.data, { type: 'buffer' });
+    // 3. Parse Excel using SheetJS
+    const workbook = XLSX.read(fileResponse.data, { type: 'buffer' });
     const sheetName = workbook.SheetNames[0];
-    const sheet = workbook.Sheets[sheetName];
-    // This assumes Excel columns: taskName, fachrulFeedback, barraFeedback
-    const updatedTasks: any[] = XLSX.utils.sheet_to_json(sheet);
+    const rawData = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1 });
 
-    // 4. DATABASE UPDATE AND HISTORY LOGGING (Lead Backend Architect Request)
-    for (const task of updatedTasks) {
-      try {
-        // 1. Update the main task table
-        const updatedRecord = await db.task.updateMany({
-          where: { 
-            task_title: task.taskName,
-            projectName: projectName 
-          },
-          data: {
-            fachrul_feedback: task.fachrulFeedback,
-            barra_feedback: task.barraFeedback
-          }
-        });
+    // 4. Extract Updates and Integrate Database Logic
+    let updateCount = 0;
+    // Row 12 is index 12 in 0-based array (13th row)
+    for (let i = 12; i < rawData.length; i++) {
+      const row: any = rawData[i];
+      if (!row || row.length === 0) continue;
 
-        // 2. Insert into History Logs as "System (M365 Sync)"
-        // Check if update was successful (depending on DB client response format)
-        if (updatedRecord && (updatedRecord.count > 0 || updatedRecord.length > 0)) {
-          await db.historyLog.create({
-            data: {
-              action: `Updated Feedback via Microsoft 365 Sync`,
-              entityName: task.taskName,
-              picName: "System (M365 Sync)", // <--- CRITICAL REQUIREMENT
-              createdAt: new Date()
+      const taskName = row[2]; // Column C (Index 2)
+      const fachrulFeedback = row[11]; // Column L (Index 11)
+      const barraFeedback = row[12]; // Column M (Index 12)
+      
+      if (taskName && !String(taskName).includes('TOTAL') && taskName !== 'Task') {
+        const fFeedbackVal = (fachrulFeedback && fachrulFeedback !== '-') ? fachrulFeedback : null;
+        const bFeedbackVal = (barraFeedback && barraFeedback !== '-') ? barraFeedback : null;
+
+        if (fFeedbackVal !== null || bFeedbackVal !== null) {
+          try {
+            // 1. Update the main task table
+            const updatedRecord = await db.task.updateMany({
+              where: { 
+                task_title: taskName,
+                projectName: projectName 
+              },
+              data: {
+                fachrul_feedback: fFeedbackVal,
+                barra_feedback: bFeedbackVal
+              }
+            });
+
+            // 2. Insert into History Logs as "System (M365 Sync)"
+            // Check if update was successful (depending on DB client response format)
+            if (updatedRecord && (updatedRecord.count > 0 || updatedRecord.length > 0)) {
+              await db.historyLog.create({
+                data: {
+                  action: `Manual Sync Feedback from M365`,
+                  entityName: taskName,
+                  picName: "System (M365 Sync)", // <--- CRITICAL REQUIREMENT
+                  createdAt: new Date()
+                }
+              });
+              updateCount++;
             }
-          });
+          } catch (dbErr) {
+            console.error(`DB Update Error for task ${taskName}:`, dbErr);
+          }
         }
-      } catch (dbErr) {
-        console.error(`Failed to update DB for task ${task.taskName}:`, dbErr);
-        // Continue to next task even if one fails
       }
     }
 
-    res.json({ 
+    res.status(200).json({ 
       success: true, 
-      message: 'Microsoft 365 data sync and database updates completed successfully.',
-      taskCount: updatedTasks.length 
+      message: `Successfully synced ${updateCount} tasks from M365.`,
+      updateCount
     });
+
   } catch (error: any) {
-    console.error('M365 Sync Error:', error.response?.data || error.message);
-    res.status(500).json({ success: false, message: 'Sync Integration Failed' });
+    if (error.response && error.response.status === 404) {
+      return res.status(404).json({ success: false, message: 'File Excel tidak ditemukan di Microsoft 365. Lakukan Export dulu.' });
+    }
+    console.error('[MANUAL SYNC ERROR]:', error.response?.data || error.message);
+    res.status(500).json({ success: false, message: 'Gagal menghubungkan ke Microsoft 365.' });
   }
 });
 

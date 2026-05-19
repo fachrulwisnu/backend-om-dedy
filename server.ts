@@ -94,21 +94,50 @@ app.post('/api/m365/upload-excel', async (req, res) => {
     );
     const accessToken = tokenResponse.data.access_token;
 
-    // TASK 1: UPDATE EXPORT ENDPOINT WITH TIMESTAMP
-    const timestamp = Date.now();
+    // TASK: IMPLEMENT ROBUST STATIC FILE OVERWRITE
     const cleanProjectName = projectName.replace(/[^a-zA-Z0-9]/g, '_');
-    const filename = `OM_DEDY_Timeline_${cleanProjectName}_${timestamp}.xlsx`;
+    const filename = `OM_DEDY_Timeline_${cleanProjectName}.xlsx`;
     
-    console.log(`[EXPORT] Creating new timestamped file: ${filename}`);
+    console.log(`[EXPORT] Using static filename: ${filename}`);
 
     const fileBuffer = Buffer.from(excelBase64, 'base64');
     const uploadUrl = `https://graph.microsoft.com/v1.0/users/${adminEmail}/drive/root:/OmDedy_Projects/${filename}:/content`;
     
-    // Perform fresh upload (PUT)
-    const uploadResponse = await axios.put(uploadUrl, fileBuffer, {
-      headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }
-    });
-    const itemId = uploadResponse.data.id;
+    // Helper function for retry logic
+    const uploadWithRetry = async (url: string, data: Buffer, token: string, retries = 3) => {
+      for (let i = 0; i < retries; i++) {
+        try {
+          return await axios.put(url, data, {
+            headers: { 
+              'Authorization': `Bearer ${token}`, 
+              'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
+            }
+          });
+        } catch (err: any) {
+          if (err.response && err.response.status === 423 && i < retries - 1) {
+            console.log(`[EXPORT] File locked, retrying in 2s... (Attempt ${i + 1}/${retries})`);
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            continue;
+          }
+          throw err;
+        }
+      }
+    };
+
+    let uploadResponse;
+    try {
+      uploadResponse = await uploadWithRetry(uploadUrl, fileBuffer, accessToken);
+    } catch (uploadErr: any) {
+      if (uploadErr.response && uploadErr.response.status === 423) {
+        return res.status(423).json({ 
+          success: false, 
+          message: "File sedang digunakan oleh user lain. Mohon tunggu 1 menit lalu coba lagi." 
+        });
+      }
+      throw uploadErr;
+    }
+
+    const itemId = uploadResponse?.data.id;
 
     // 4. Generate or Retrieve the Permanent Sharing Link (Safely handles open files)
     const linkUrl = `https://graph.microsoft.com/v1.0/users/${adminEmail}/drive/items/${itemId}/createLink`;

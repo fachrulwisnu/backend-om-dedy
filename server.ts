@@ -13,6 +13,73 @@ app.use(express.json({ limit: '50mb' }));
 // Helper function for sleep
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+app.get('/api/m365/get-comments', async (req, res) => {
+  try {
+    const { projectName } = req.query;
+    if (!projectName) {
+      return res.status(400).json({ success: false, message: 'Missing projectName' });
+    }
+
+    const tenantId = process.env.M365_TENANT_ID;
+    const clientId = process.env.M365_CLIENT_ID;
+    const clientSecret = process.env.M365_CLIENT_SECRET;
+    const adminEmail = process.env.M365_ADMIN_EMAIL;
+
+    // 1. Get Access Token
+    const tokenResponse = await axios.post(
+      `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
+      new URLSearchParams({ 
+        client_id: clientId!, 
+        scope: 'https://graph.microsoft.com/.default', 
+        client_secret: clientSecret!, 
+        grant_type: 'client_credentials' 
+      }).toString(),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+    );
+    const accessToken = tokenResponse.data.access_token;
+
+    const filename = `OM_DEDY_Timeline_${String(projectName).replace(/[^a-zA-Z0-9]/g, '_')}.xlsx`;
+    const contentUrl = `https://graph.microsoft.com/v1.0/users/${adminEmail}/drive/root:/OmDedy_Projects/${filename}:/content`;
+
+    let comments: { [key: string]: { fachrul: string, barra: string } } = {};
+
+    try {
+      const downloadResponse = await axios.get(contentUrl, {
+        headers: { 'Authorization': `Bearer ${accessToken}` },
+        responseType: 'arraybuffer'
+      });
+
+      const workbook = XLSX.read(downloadResponse.data, { type: 'buffer' });
+      const sheetName = 'Timeline & Breakdown';
+      
+      if (workbook.SheetNames.includes(sheetName)) {
+        const worksheet = workbook.Sheets[sheetName];
+        const rows: any[] = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+        
+        rows.forEach((row, index) => {
+          if (index > 0 && row[0]) {
+            const taskTitle = String(row[0]).trim();
+            comments[taskTitle] = {
+              fachrul: row[11] || "-",
+              barra: row[12] || "-"
+            };
+          }
+        });
+      }
+    } catch (err: any) {
+      if (err.response && err.response.status === 404) {
+        return res.json({ success: true, comments: {} });
+      }
+      throw err;
+    }
+
+    res.json({ success: true, comments });
+  } catch (error: any) {
+    console.error('Fetch Comments Error:', error.response?.data || error.message);
+    res.status(500).json({ success: false, message: 'Failed to fetch comments' });
+  }
+});
+
 app.post('/api/m365/upload-excel', async (req, res) => {
   try {
     const { filename, excelBase64 } = req.body;
@@ -38,75 +105,10 @@ app.post('/api/m365/upload-excel', async (req, res) => {
     );
     const accessToken = tokenResponse.data.access_token;
 
-    const fileUrl = `https://graph.microsoft.com/v1.0/users/${adminEmail}/drive/root:/OmDedy_Projects/${filename}`;
-    const contentUrl = `${fileUrl}:/content`;
+    const contentUrl = `https://graph.microsoft.com/v1.0/users/${adminEmail}/drive/root:/OmDedy_Projects/${filename}:/content`;
     
-    let existingCommentsMap: { [key: string]: { fachrul: string, barra: string } } = {};
-
-    // STEP 1: READ EXISTING EXCEL (If it exists)
-    try {
-      const downloadResponse = await axios.get(contentUrl, {
-        headers: { 'Authorization': `Bearer ${accessToken}` },
-        responseType: 'arraybuffer'
-      });
-
-      const workbook = XLSX.read(downloadResponse.data, { type: 'buffer' });
-      const sheetName = 'Timeline & Breakdown';
-      
-      if (workbook.SheetNames.includes(sheetName)) {
-        const worksheet = workbook.Sheets[sheetName];
-        const rows: any[] = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
-        
-        // Assuming Column A is Task Title/ID, Column L is Fachrul Feedback (index 11), Column M is Barra Feedback (index 12)
-        // Adjust the header row index if necessary (usually index 0 or 1)
-        rows.forEach((row, index) => {
-          if (index > 0 && row[0]) { // Generic skip header
-            const taskTitle = String(row[0]).trim();
-            existingCommentsMap[taskTitle] = {
-              fachrul: row[11] || "-",
-              barra: row[12] || "-"
-            };
-          }
-        });
-      }
-    } catch (err: any) {
-      if (err.response && err.response.status === 404) {
-        console.log(`[INFO] File ${filename} does not exist yet. Creating a new one without merging comments.`);
-        existingCommentsMap = {}; // Safe fallback
-      } else {
-        console.error("[ERROR] Failed to fetch existing Excel file:", err.message);
-        throw err; 
-      }
-    }
-
-    // STEP 2: MERGE LOGIC WITH NEW PAYLOAD
-    const incomingBuffer = Buffer.from(excelBase64, 'base64');
-    const newWorkbook = XLSX.read(incomingBuffer, { type: 'buffer' });
-    const targetSheetName = 'Timeline & Breakdown';
-
-    if (newWorkbook.SheetNames.includes(targetSheetName)) {
-      const worksheet = newWorkbook.Sheets[targetSheetName];
-      const rows: any[] = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
-
-      rows.forEach((row, index) => {
-        if (index > 0 && row[0]) {
-          const taskTitle = String(row[0]).trim();
-          if (existingCommentsMap[taskTitle]) {
-            row[11] = existingCommentsMap[taskTitle].fachrul;
-            row[12] = existingCommentsMap[taskTitle].barra;
-          } else {
-            row[11] = row[11] || "-";
-            row[12] = row[12] || "-";
-          }
-        }
-      });
-
-      // Update the worksheet with merged data
-      const updatedWorksheet = XLSX.utils.aoa_to_sheet(rows);
-      newWorkbook.Sheets[targetSheetName] = updatedWorksheet;
-    }
-
-    const finalBuffer = XLSX.write(newWorkbook, { type: 'buffer', bookType: 'xlsx' });
+    // Convert Base64 to Buffer
+    const fileBuffer = Buffer.from(excelBase64, 'base64');
 
     // STEP 3: WRITE (OVERWRITE WITH RETRY)
     let uploadSuccess = false;
@@ -115,7 +117,7 @@ app.post('/api/m365/upload-excel', async (req, res) => {
 
     while (attempts < 3 && !uploadSuccess) {
       try {
-        const uploadResponse = await axios.put(contentUrl, finalBuffer, {
+        const uploadResponse = await axios.put(contentUrl, fileBuffer, {
           headers: { 
             'Authorization': `Bearer ${accessToken}`, 
             'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 

@@ -3,23 +3,61 @@ import cors from 'cors';
 import axios from 'axios';
 import dotenv from 'dotenv';
 import * as XLSX from 'xlsx';
+import { createClient } from '@supabase/supabase-js';
 
 dotenv.config();
 
+// Initialize Supabase Client
+const supabaseUrl = process.env.SUPABASE_URL || '';
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+const supabase = createClient(supabaseUrl, supabaseKey);
+
 // Placeholder for the database client.
 // The user should replace this with their actual DB client (Prisma, Supabase, etc.)
-// For now, it is defined to satisfy TypeScript and provide a structure.
-const db: any = (global as any).db || {
-  task: { updateMany: async () => ({ count: 1 }) },
-  historyLog: { create: async () => ({}) },
+// For now, these are mapped to Supabase calls.
+const db: any = {
+  task: { 
+    updateMany: async ({ where, data }: any) => {
+      const { data: result, error } = await supabase
+        .from('tasks')
+        .update(data)
+        .match(where)
+        .select();
+      if (error) throw error;
+      return { count: Array.isArray(result) ? result.length : 0 };
+    }
+  },
+  historyLog: {
+    create: async ({ data }: any) => {
+      const { error } = await supabase
+        .from('history_logs')
+        .insert(data);
+      if (error) throw error;
+    }
+  },
   project: {
-    findFirst: async ({ where }: any) => ({
-      id: where.id || 'p123',
-      name: where.name || 'Project Name',
-      current_excel_filename: `OM_DEDY_Timeline_${where.name || 'Project'}_latest.xlsx`,
-      current_sharing_url: 'https://onedrive.live.com/test'
-    }),
-    update: async ({ where, data }: any) => ({ ...where, ...data })
+    findFirst: async ({ where }: any) => {
+      const { data, error } = await supabase
+        .from('projects')
+        .select('*')
+        .eq('id', where.id)
+        .maybeSingle();
+      if (error) {
+        console.error("[DB ERROR] findFirst failed:", error);
+        return null;
+      }
+      return data;
+    },
+    update: async ({ where, data }: any) => {
+      const { data: result, error } = await supabase
+        .from('projects')
+        .update(data)
+        .eq('id', where.id)
+        .select()
+        .single();
+      if (error) throw error;
+      return result;
+    }
   }
 };
 
@@ -30,6 +68,10 @@ app.use(express.json({ limit: '50mb' }));
 app.post('/api/m365/upload-excel', async (req, res) => {
   try {
     const { projectId, projectName, excelBase64 } = req.body;
+    
+    // Log incoming payload as requested
+    console.log("[EXPORT PAYLOAD] Received:", { projectName, projectId });
+
     if (!projectId || !projectName || !excelBase64) {
       return res.status(400).json({ success: false, message: 'Missing projectId, projectName or Excel data' });
     }
@@ -78,18 +120,29 @@ app.post('/api/m365/upload-excel', async (req, res) => {
 
     const sharingUrl = linkResponse.data.link.webUrl;
 
-    // UPDATE THE DATABASE with latest metadata using projectId
-    try {
-      await db.project.update({
-        where: { id: projectId },
-        data: {
-          current_excel_filename: filename,
-          current_sharing_url: sharingUrl
+    // FIX SUPABASE UPDATE QUERY IN upload-excel ROUTE
+    if (!projectId) {
+      console.error("[DB ERROR] Cannot update Supabase: projectId is missing from frontend request!");
+    } else {
+      try {
+        console.log(`[DB ATTEMPT] Updating project ${projectId} in Supabase...`);
+
+        const { error } = await supabase
+          .from('projects')
+          .update({ 
+            current_excel_filename: filename, 
+            current_sharing_url: sharingUrl 
+          })
+          .eq('id', projectId);
+
+        if (error) {
+          console.error("[SUPABASE UPDATE ERROR]:", error);
+        } else {
+          console.log("[SUPABASE UPDATE SUCCESS] DB updated for project:", projectName);
         }
-      });
-      console.log(`[DB UPDATE] Saved metadata for projectId: ${projectId}`);
-    } catch (dbErr) {
-      console.error(`[DB ERROR] Failed to save project metadata:`, dbErr);
+      } catch (dbCrash) {
+        console.error("[SUPABASE CRASH]:", dbCrash);
+      }
     }
 
     res.json({ success: true, embedUrl: sharingUrl });

@@ -94,16 +94,16 @@ app.post('/api/m365/upload-excel', async (req, res) => {
     );
     const accessToken = tokenResponse.data.access_token;
 
-    // TASK: IMPLEMENT ROBUST STATIC FILE OVERWRITE
+    // ONE-WAY EXPORT: Uses static filename
     const cleanProjectName = projectName.replace(/[^a-zA-Z0-9]/g, '_');
     const filename = `OM_DEDY_Timeline_${cleanProjectName}.xlsx`;
     
-    console.log(`[EXPORT] Using static filename: ${filename}`);
+    console.log(`[EXPORT] Prepared for one-way push: ${filename}`);
 
     const fileBuffer = Buffer.from(excelBase64, 'base64');
     const uploadUrl = `https://graph.microsoft.com/v1.0/users/${adminEmail}/drive/root:/OmDedy_Projects/${filename}:/content`;
     
-    // Helper function for retry logic
+    // Robust overwrite with retry to handle M365 file locking
     const uploadWithRetry = async (url: string, data: Buffer, token: string, retries = 3) => {
       for (let i = 0; i < retries; i++) {
         try {
@@ -115,7 +115,7 @@ app.post('/api/m365/upload-excel', async (req, res) => {
           });
         } catch (err: any) {
           if (err.response && err.response.status === 423 && i < retries - 1) {
-            console.log(`[EXPORT] File locked, retrying in 2s... (Attempt ${i + 1}/${retries})`);
+            console.log(`[EXPORT] File locked (423), retrying in 2s... (Attempt ${i + 1}/${retries})`);
             await new Promise(resolve => setTimeout(resolve, 2000));
             continue;
           }
@@ -139,7 +139,7 @@ app.post('/api/m365/upload-excel', async (req, res) => {
 
     const itemId = uploadResponse?.data.id;
 
-    // 4. Generate or Retrieve the Permanent Sharing Link (Safely handles open files)
+    // Generate or retrieve the permanent sharing link
     const linkUrl = `https://graph.microsoft.com/v1.0/users/${adminEmail}/drive/items/${itemId}/createLink`;
     const linkResponse = await axios.post(
       linkUrl, 
@@ -149,29 +149,23 @@ app.post('/api/m365/upload-excel', async (req, res) => {
 
     const sharingUrl = linkResponse.data.link.webUrl;
 
-    // FIX SUPABASE UPDATE QUERY IN upload-excel ROUTE
-    if (!projectId) {
-      console.error("[DB ERROR] Cannot update Supabase: projectId is missing from frontend request!");
-    } else {
-      try {
-        console.log(`[DB ATTEMPT] Updating project ${projectId} in Supabase...`);
+    // Update database with latest export metadata
+    try {
+      const { error } = await supabase
+        .from('projects')
+        .update({ 
+          current_excel_filename: filename, 
+          current_sharing_url: sharingUrl 
+        })
+        .eq('id', projectId);
 
-        const { error } = await supabase
-          .from('projects')
-          .update({ 
-            current_excel_filename: filename, 
-            current_sharing_url: sharingUrl 
-          })
-          .eq('id', projectId);
-
-        if (error) {
-          console.error("[SUPABASE UPDATE ERROR]:", error);
-        } else {
-          console.log("[SUPABASE UPDATE SUCCESS] DB updated for project:", projectName);
-        }
-      } catch (dbCrash) {
-        console.error("[SUPABASE CRASH]:", dbCrash);
+      if (error) {
+        console.error("[SUPABASE UPDATE ERROR]:", error);
+      } else {
+        console.log("[SUPABASE UPDATE SUCCESS] DB updated for project:", projectName);
       }
+    } catch (dbCrash) {
+      console.error("[SUPABASE CRASH]:", dbCrash);
     }
 
     res.json({ success: true, embedUrl: sharingUrl });
@@ -188,12 +182,11 @@ app.post('/api/m365/sync-feedback', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Project ID and Name are required' });
     }
 
-    // TASK 2: UPDATE SYNC ENDPOINT BASED ON DATABASE
-    // Query database to get the current_excel_filename for the requested projectId
+    // 1. Fetch the latest project data from the database using projectId
     const project = await db.project.findFirst({ where: { id: projectId } });
     
     if (!project || !project.current_excel_filename) {
-      return res.status(404).json({ success: false, message: 'File Excel untuk proyek ini belum pernah diexport atau tidak ditemukan.' });
+      return res.status(404).json({ success: false, message: 'File Excel tidak ditemukan. Silakan ekspor terlebih dahulu.' });
     }
 
     const filename = project.current_excel_filename;
@@ -291,14 +284,14 @@ app.post('/api/m365/sync-feedback', async (req, res) => {
 
   } catch (error: any) {
     if (error.response && error.response.status === 404) {
-      return res.status(404).json({ success: false, message: 'File Excel tidak ditemukan di Microsoft 365. Lakukan Export dulu.' });
+      return res.status(404).json({ success: false, message: 'File Excel tidak ditemukan di Microsoft 365. Lakukan export terlebih dahulu.' });
     }
     console.error('[MANUAL SYNC ERROR]:', error.response?.data || error.message);
-    res.status(500).json({ success: false, message: 'Gagal menghubungkan ke Microsoft 365.' });
+    res.status(500).json({ success: false, message: 'Gagal melakukan sinkronisasi dengan Microsoft 365.' });
   }
 });
 
-// TASK 3: IMPLEMENT THE PERMANENT REDIRECT ENDPOINT
+// Permanent Redirect Endpoint
 app.get('/api/m365/share-link/:projectId', async (req, res) => {
   try {
     const { projectId } = req.params;

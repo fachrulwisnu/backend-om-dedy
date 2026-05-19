@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from "motion/react";
 
 export default function App() {
   const [file, setFile] = useState<File | null>(null);
+  const [projectName, setProjectName] = useState("");
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [shareUrl, setShareUrl] = useState<string | null>(null);
@@ -46,11 +47,16 @@ export default function App() {
 
     try {
       const base64 = await readFileAsBase64(file);
+      
+      // Clean up the project name from special characters to ensure a safe, static filename
+      const cleanProjectName = (projectName || 'Project').replace(/[^a-zA-Z0-9]/g, '_');
+      const filename = `OM_DEDY_Timeline_${cleanProjectName}.xlsx`;
+
       const response = await fetch("/api/m365/upload-excel", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          filename: file.name,
+          filename: filename,
           excelBase64: base64,
         }),
       });
@@ -89,6 +95,20 @@ export default function App() {
               animate={{ opacity: 1, y: 0 }}
               className="space-y-6"
             >
+              <div className="space-y-2">
+                <label htmlFor="projectName" className="text-sm font-semibold text-slate-700 ml-1">
+                  Project Name
+                </label>
+                <input
+                  id="projectName"
+                  type="text"
+                  placeholder="Enter project name (e.g. Q2_Marketing)"
+                  value={projectName}
+                  onChange={(e) => setProjectName(e.target.value)}
+                  className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-slate-900/5 focus:border-slate-900 transition-all text-sm"
+                />
+              </div>
+
               <div 
                 id="dropzone"
                 onClick={() => fileInputRef.current?.click()}

@@ -21,7 +21,7 @@ app.post('/api/m365/upload-excel', async (req, res) => {
     const clientSecret = process.env.M365_CLIENT_SECRET;
     const adminEmail = process.env.M365_ADMIN_EMAIL;
 
-    // 1. Get Access Token
+    // 1. Get Microsoft Graph Access Token
     const tokenResponse = await axios.post(
       `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
       new URLSearchParams({ 
@@ -34,22 +34,37 @@ app.post('/api/m365/upload-excel', async (req, res) => {
     );
     const accessToken = tokenResponse.data.access_token;
 
-    // 2. Convert Base64 to Buffer
-    const fileBuffer = Buffer.from(excelBase64, 'base64');
+    let itemId;
+    const checkUrl = `https://graph.microsoft.com/v1.0/users/${adminEmail}/drive/root:/OmDedy_Projects/${filename}`;
 
-    // 3. Upload to OneDrive
-    const uploadUrl = `https://graph.microsoft.com/v1.0/users/${adminEmail}/drive/root:/OmDedy_Projects/${filename}:/content`;
-    const uploadResponse = await axios.put(uploadUrl, fileBuffer, {
-      headers: { 
-        'Authorization': `Bearer ${accessToken}`, 
-        'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
+    try {
+      // 2. SMART CHECK: See if the file already exists to bypass locking issues
+      const checkResponse = await axios.get(checkUrl, {
+        headers: { 'Authorization': `Bearer ${accessToken}` }
+      });
+      itemId = checkResponse.data.id; // File exists! Reuse this ID without overwriting
+    } catch (err: any) {
+      // 3. IF FILE DOES NOT EXIST (404), UPLOAD IT FOR THE FIRST TIME
+      if (err.response && err.response.status === 404) {
+        const fileBuffer = Buffer.from(excelBase64, 'base64');
+        const uploadUrl = `${checkUrl}:/content`;
+        const uploadResponse = await axios.put(uploadUrl, fileBuffer, {
+          headers: { 
+            'Authorization': `Bearer ${accessToken}`, 
+            'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
+          }
+        });
+        itemId = uploadResponse.data.id;
+      } else {
+        throw err; // Rethrow any other unexpected network errors
       }
-    });
+    }
 
-    // 4. Generate Editable Link (NO LOGIN REQUIRED)
-    const linkUrl = `https://graph.microsoft.com/v1.0/users/${adminEmail}/drive/items/${uploadResponse.data.id}/createLink`;
+    // 4. Generate or Retrieve the Permanent Sharing Link (Safely handles open files)
+    const linkUrl = `https://graph.microsoft.com/v1.0/users/${adminEmail}/drive/items/${itemId}/createLink`;
     const linkResponse = await axios.post(
-      linkUrl, { type: 'edit', scope: 'anonymous' },
+      linkUrl, 
+      { type: 'edit', scope: 'anonymous' }, 
       { headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
     );
 

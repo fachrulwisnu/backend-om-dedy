@@ -71,9 +71,11 @@ app.post('/api/m365/upload-excel', async (req, res) => {
       }
     } catch (err: any) {
       if (err.response && err.response.status === 404) {
-        console.log("File does not exist yet. Primary upload mode.");
+        console.log(`[INFO] File ${filename} does not exist yet. Creating a new one without merging comments.`);
+        existingCommentsMap = {}; // Safe fallback
       } else {
-        console.warn("Could not read existing file for merge, proceeding with fresh upload:", err.message);
+        console.error("[ERROR] Failed to fetch existing Excel file:", err.message);
+        throw err; 
       }
     }
 

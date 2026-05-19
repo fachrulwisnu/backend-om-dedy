@@ -21,13 +21,17 @@ app.post('/api/m365/upload-excel', async (req, res) => {
     const clientSecret = process.env.M365_CLIENT_SECRET;
     const adminEmail = process.env.M365_ADMIN_EMAIL;
 
+    if (!tenantId || !clientId || !clientSecret || !adminEmail) {
+      return res.status(500).json({ success: false, message: 'M365 Configuration Missing' });
+    }
+
     // 1. Get Microsoft Graph Access Token
     const tokenResponse = await axios.post(
       `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
       new URLSearchParams({ 
-        client_id: clientId!, 
+        client_id: clientId, 
         scope: 'https://graph.microsoft.com/.default', 
-        client_secret: clientSecret!, 
+        client_secret: clientSecret, 
         grant_type: 'client_credentials' 
       }).toString(),
       { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
@@ -36,10 +40,10 @@ app.post('/api/m365/upload-excel', async (req, res) => {
 
     const contentUrl = `https://graph.microsoft.com/v1.0/users/${adminEmail}/drive/root:/OmDedy_Projects/${filename}:/content`;
     
-    // Convert Base64 to Buffer
+    // 2. Convert Base64 to Buffer
     const fileBuffer = Buffer.from(excelBase64, 'base64');
 
-    // 2. Upload to OneDrive
+    // 3. Upload to OneDrive (PUT overwrites by default or creates fresh)
     const uploadResponse = await axios.put(contentUrl, fileBuffer, {
       headers: { 
         'Authorization': `Bearer ${accessToken}`, 
@@ -47,7 +51,7 @@ app.post('/api/m365/upload-excel', async (req, res) => {
       }
     });
 
-    // 3. Generate Sharing/Embed Link
+    // 4. Generate Sharing Link
     const itemId = uploadResponse.data.id;
     const linkUrl = `https://graph.microsoft.com/v1.0/users/${adminEmail}/drive/items/${itemId}/createLink`;
     const linkResponse = await axios.post(

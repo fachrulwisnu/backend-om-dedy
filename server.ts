@@ -11,7 +11,22 @@ dotenv.config();
 // For now, it is defined to satisfy TypeScript and provide a structure.
 const db: any = (global as any).db || {
   task: { updateMany: async () => ({ count: 1 }) },
-  historyLog: { create: async () => ({}) }
+  historyLog: { create: async () => ({}) },
+  project: {
+    findFirst: async ({ where }: any) => ({
+      name: where.name,
+      current_excel_filename: `OM_DEDY_Timeline_${where.name}_latest.xlsx`,
+      current_sharing_url: 'https://onedrive.live.com/test'
+    }),
+    update: async ({ where, data }: any) => ({ ...where, ...data })
+  },
+  getProjectByName: async (name: string) => {
+    return {
+      name,
+      current_excel_filename: `OM_DEDY_Timeline_${name.replace(/[^a-zA-Z0-9]/g, '_')}_latest.xlsx`,
+      current_sharing_url: 'https://onedrive.live.com/test'
+    };
+  }
 };
 
 const app = express();
@@ -20,9 +35,9 @@ app.use(express.json({ limit: '50mb' }));
 
 app.post('/api/m365/upload-excel', async (req, res) => {
   try {
-    const { filename, excelBase64 } = req.body;
-    if (!filename || !excelBase64) {
-      return res.status(400).json({ success: false, message: 'Missing file data' });
+    const { projectName, excelBase64 } = req.body;
+    if (!projectName || !excelBase64) {
+      return res.status(400).json({ success: false, message: 'Missing projectName or Excel data' });
     }
 
     const tenantId = process.env.M365_TENANT_ID;
@@ -43,43 +58,21 @@ app.post('/api/m365/upload-excel', async (req, res) => {
     );
     const accessToken = tokenResponse.data.access_token;
 
-    let itemId;
-    const checkUrl = `https://graph.microsoft.com/v1.0/users/${adminEmail}/drive/root:/OmDedy_Projects/${filename}`;
+    // TASK 1: UPDATE EXPORT ENDPOINT WITH TIMESTAMP
+    const timestamp = Date.now();
+    const cleanProjectName = projectName.replace(/[^a-zA-Z0-9]/g, '_');
+    const filename = `OM_DEDY_Timeline_${cleanProjectName}_${timestamp}.xlsx`;
+    
+    console.log(`[EXPORT] Creating new timestamped file: ${filename}`);
 
-    try {
-      // Check if file exists
-      const checkResponse = await axios.get(checkUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
-      itemId = checkResponse.data.id; 
-
-      // FIX: OVERWRITE THE FILE WITH NEW DATA!
-      try {
-        const fileBuffer = Buffer.from(excelBase64, 'base64');
-        const uploadUrl = `https://graph.microsoft.com/v1.0/users/${adminEmail}/drive/items/${itemId}/content`;
-        await axios.put(uploadUrl, fileBuffer, {
-          headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }
-        });
-        console.log(`[EXPORT] Successfully overwrote existing file: ${filename}`);
-      } catch (overwriteErr: any) {
-        if (overwriteErr.response && overwriteErr.response.status === 423) {
-          // Return a safe error if the file is locked by a user
-          return res.status(423).json({ success: false, message: 'File Excel sedang dibuka. Harap tutup tab Excel Online Anda terlebih dahulu sebelum menambah Task!' });
-        }
-        throw overwriteErr;
-      }
-
-    } catch (err: any) {
-      // IF FILE DOES NOT EXIST (404), CREATE IT
-      if (err.response && err.response.status === 404) {
-        const fileBuffer = Buffer.from(excelBase64, 'base64');
-        const uploadUrl = `${checkUrl}:/content`;
-        const uploadResponse = await axios.put(uploadUrl, fileBuffer, {
-          headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }
-        });
-        itemId = uploadResponse.data.id;
-      } else {
-        throw err;
-      }
-    }
+    const fileBuffer = Buffer.from(excelBase64, 'base64');
+    const uploadUrl = `https://graph.microsoft.com/v1.0/users/${adminEmail}/drive/root:/OmDedy_Projects/${filename}:/content`;
+    
+    // Perform fresh upload (PUT)
+    const uploadResponse = await axios.put(uploadUrl, fileBuffer, {
+      headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }
+    });
+    const itemId = uploadResponse.data.id;
 
     // 4. Generate or Retrieve the Permanent Sharing Link (Safely handles open files)
     const linkUrl = `https://graph.microsoft.com/v1.0/users/${adminEmail}/drive/items/${itemId}/createLink`;
@@ -89,7 +82,23 @@ app.post('/api/m365/upload-excel', async (req, res) => {
       { headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
     );
 
-    res.json({ success: true, embedUrl: linkResponse.data.link.webUrl });
+    const sharingUrl = linkResponse.data.link.webUrl;
+
+    // UPDATE THE DATABASE with latest metadata
+    try {
+      await db.project.update({
+        where: { name: projectName },
+        data: {
+          current_excel_filename: filename,
+          current_sharing_url: sharingUrl
+        }
+      });
+      console.log(`[DB UPDATE] Saved metadata for project: ${projectName}`);
+    } catch (dbErr) {
+      console.error(`[DB ERROR] Failed to save project metadata:`, dbErr);
+    }
+
+    res.json({ success: true, embedUrl: sharingUrl });
   } catch (error: any) {
     console.error('M365 API Error:', error.response?.data || error.message);
     res.status(500).json({ success: false, message: 'Integration Failed' });
@@ -103,10 +112,16 @@ app.post('/api/m365/sync-feedback', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Project Name is required' });
     }
 
-    const cleanProjectName = projectName.replace(/[^a-zA-Z0-9]/g, '_');
-    const filename = `OM_DEDY_Timeline_${cleanProjectName}.xlsx`;
+    // TASK 2: UPDATE SYNC ENDPOINT BASED ON DATABASE
+    // Query database to get the current_excel_filename for the requested projectName
+    const project = await db.project.findFirst({ where: { name: projectName } });
+    
+    if (!project || !project.current_excel_filename) {
+      return res.status(404).json({ success: false, message: 'File Excel untuk proyek ini belum pernah diexport atau tidak ditemukan.' });
+    }
 
-    console.log(`[MANUAL SYNC] Initiated for project: ${projectName}, filename: ${filename}`);
+    const filename = project.current_excel_filename;
+    console.log(`[MANUAL SYNC] Initiated for project: ${projectName}, using filename from DB: ${filename}`);
 
     const tenantId = process.env.M365_TENANT_ID;
     const clientId = process.env.M365_CLIENT_ID;
@@ -204,6 +219,29 @@ app.post('/api/m365/sync-feedback', async (req, res) => {
     }
     console.error('[MANUAL SYNC ERROR]:', error.response?.data || error.message);
     res.status(500).json({ success: false, message: 'Gagal menghubungkan ke Microsoft 365.' });
+  }
+});
+
+// TASK 3: IMPLEMENT THE PERMANENT REDIRECT ENDPOINT
+app.get('/api/m365/share-link/:projectName', async (req, res) => {
+  try {
+    const { projectName } = req.params;
+    
+    // 1. Fetch the latest project data from our database
+    const project = await db.project.findFirst({ where: { name: projectName } });
+    
+    if (!project || !project.current_sharing_url) {
+      return res.status(404).send("File Excel untuk proyek ini belum pernah diexport atau tidak ditemukan.");
+    }
+
+    console.log(`[REDIRECT] Forwarding user to latest Excel for: ${projectName}`);
+    
+    // 2. Perform a HTTP 302 temporary redirect to the actual dynamic Microsoft link
+    return res.redirect(project.current_sharing_url);
+
+  } catch (error: any) {
+    console.error("[REDIRECT ERROR]:", error.message);
+    res.status(500).send("Gagal mengalihkan komponen tautan Microsoft 365.");
   }
 });
 

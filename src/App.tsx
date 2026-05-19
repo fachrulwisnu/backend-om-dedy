@@ -3,6 +3,7 @@ import { Upload, FileSpreadsheet, CheckCircle2, AlertCircle, ExternalLink, Loade
 import { motion, AnimatePresence } from "motion/react";
 
 export default function App() {
+  const [projectName, setProjectName] = useState("My_Awesome_Project");
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -39,7 +40,7 @@ export default function App() {
   };
 
   const handleUpload = async () => {
-    if (!file) return;
+    if (!file || !projectName) return;
 
     setUploading(true);
     setError(null);
@@ -50,7 +51,7 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          filename: file.name,
+          projectName: projectName,
           excelBase64: base64,
         }),
       });
@@ -58,7 +59,10 @@ export default function App() {
       const data = await response.json();
 
       if (data.success) {
-        setShareUrl(data.embedUrl);
+        // The shareUrl from response is the direct M365 link, 
+        // but we can also use our permanent redirect link.
+        const permanentLink = `${window.location.origin}/api/m365/share-link/${encodeURIComponent(projectName)}`;
+        setShareUrl(permanentLink);
       } else {
         setError(data.message || "Failed to upload file.");
       }
@@ -89,6 +93,17 @@ export default function App() {
               animate={{ opacity: 1, y: 0 }}
               className="space-y-6"
             >
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Project Name</label>
+                <input 
+                  type="text"
+                  value={projectName}
+                  onChange={(e) => setProjectName(e.target.value)}
+                  placeholder="Enter project/timeline name"
+                  className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:border-slate-900 focus:ring-1 focus:ring-slate-900 outline-none transition-all text-sm"
+                />
+              </div>
+
               <div 
                 id="dropzone"
                 onClick={() => fileInputRef.current?.click()}
@@ -126,11 +141,11 @@ export default function App() {
               <div className="space-y-4">
                 <button
                   id="upload-button"
-                  disabled={!file || uploading}
+                  disabled={!file || uploading || !projectName}
                   onClick={handleUpload}
                   className={`
                     w-full py-4 rounded-xl flex items-center justify-center gap-2 font-medium transition-all
-                    ${!file || uploading 
+                    ${!file || uploading || !projectName
                       ? 'bg-slate-100 text-slate-400 cursor-not-allowed' 
                       : 'bg-slate-900 text-white hover:bg-slate-800 shadow-lg active:scale-[0.98]'}
                   `}
